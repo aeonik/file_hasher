@@ -47,24 +47,38 @@
   [& args]
   (greet {:name (first args)})
 
-  (def file-set-count (count file-set))
-  (def starting-hashed-set-count (count hashed-file-paths))
-  (def unhashed-files-remaining (atom (count unhashed-files)))
+  (let [file-set-count (count file-set)
+        starting-hashed-set-count (count hashed-file-paths)
+        unhashed-files-remaining (atom (count unhashed-files))
+        start-time (System/currentTimeMillis)
+        time-queue (atom [])
+        n 10]
 
-  ;; Number of total files
-  (println "Total files:" file-set-count)
-  ;; Number of hashed files
-  (println "Hashed files:" starting-hashed-set-count)
-  (println "Unhashed files to go:" @unhashed-files-remaining)
+    ;; Number of total files
+    (println "Total files:" file-set-count)
+    ;; Number of hashed files
+    (println "Starting Hashed files:" starting-hashed-set-count)
+    (println "Starting Unhashed files:" @unhashed-files-remaining)
 
-  ;; Process unhashed files
-  (doseq [file unhashed-files]
-    (let [hash-result (hash-file file)]
-      (when hash-result
-        (spit hashed-file-path hash-result :append true)
-        (swap! unhashed-files-remaining dec)
-        (print (str "Files remaining: " (abs (+ starting-hashed-set-count (- @unhashed-files-remaining)))
-                    " Percentage complete: " (float (* 100 (/ (- file-set-count @unhashed-files-remaining) file-set-count))) "%\r"))
-        (flush))))
+    (doseq [file unhashed-files]
+      (let [hash-result (hash-file file)
+            current-time (System/currentTimeMillis)
+            elapsed-time (- current-time start-time)
+            files-processed (abs (+ starting-hashed-set-count (- @unhashed-files-remaining)))
+            percentage-complete (float (* 100 (/ files-processed file-set-count)))
+            _ (swap! time-queue conj current-time)
+            _ (when (> (count @time-queue) n) (swap! time-queue pop))
+            avg-time-per-file (/ (reduce + (map - (rest @time-queue) @time-queue)) (min n files-processed))
+            remaining-time (* avg-time-per-file @unhashed-files-remaining)]
 
-  )
+        (when hash-result
+          (spit hashed-file-path hash-result :append true)
+          (swap! unhashed-files-remaining dec)
+          (print (str "Files remaining: " (abs (+ starting-hashed-set-count (- @unhashed-files-remaining))) ", "
+                      "Percentage complete: " (format "%.2f" (float (* 100 (/ (- file-set-count @unhashed-files-remaining) file-set-count)))) "%, "
+                      "Estimated time remaining: " (format "%.4f" (double (/ remaining-time (* 1000 60 60)))) " hours \r"))
+          (flush))
+
+        ))))
+
+
