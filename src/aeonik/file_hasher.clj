@@ -30,8 +30,11 @@
 (def hashed-file-path "/opt/backup_nvme_recovery/sha256sums_backup_hdd.txt")
 (def error-file-path "/opt/backup_nvme_recovery/sha256sums_backup_hdd_errors.txt")
 (def file-list-path "/opt/backup_nvme_recovery/backup_hdd_file_list.txt")
-(def alpha 0.1)
+(def alpha 0.01)
+(def smoothing-alpha 0.01)
 (def average-time-per-file (atom 0))
+(def remaining-files-rate (atom 0))
+(def last-update-time (atom (System/currentTimeMillis)))
 (defn read-file-into-set [file-path]
   (let [lines (with-open [rdr (io/reader file-path)]
                 (doall (line-seq rdr)))]
@@ -67,48 +70,43 @@
 (defn exponential-moving-average [current-average new-value weight]
   (+ (* weight new-value) (* (- 1 weight) current-average)))
 
-(defn update-progress [file-count hashed-count remaining-count elapsed-time]
+(defn update-progress [file-count hashed-count remaining-count]
   (let [percentage-complete (float (* 100 (/ (- file-count remaining-count) file-count)))
-        avg-time-per-file (/ elapsed-time hashed-count)
-        remaining-time (* avg-time-per-file remaining-count)]
+        current-time (System/currentTimeMillis)
+        time-since-last-update (- current-time @last-update-time)
+        raw-remaining-files-rate (if (zero? time-since-last-update) @remaining-files-rate (/ 1 time-since-last-update)) ; files per millisecond
+        smoothed-remaining-files-rate (exponential-moving-average @remaining-files-rate raw-remaining-files-rate smoothing-alpha)
+        remaining-time (long (* remaining-count (/ 1 smoothed-remaining-files-rate))) ; in milliseconds
+        remaining-hours (float (/ remaining-time (* 1000 60 60)))] ; convert to hours
     (print (str "Files remaining: " remaining-count ", "
                 "Percentage complete: " (format "%.2f" (float percentage-complete)) "%, "
-                "Estimated time remaining: " (format "%.2f" (float (/ remaining-time (* 1000 60 60)))) " hours \r"))
+                "Estimated time remaining: " (format "%.2f" remaining-hours) " hours \r"))
+    (reset! last-update-time current-time)
+    (reset! remaining-files-rate smoothed-remaining-files-rate)
     (flush)))
 
-(defn hash-and-update-progress [file]
-  (let [start-time (System/currentTimeMillis)
-        hash-result (hash-file file)
-        end-time (System/currentTimeMillis)
-        time-taken (- end-time start-time)]
+(defn hash-and-append-result [file-path]
+  (let [hash-result (hash-file file-path)]
     (when hash-result
-      (spit hashed-file-path hash-result :append true))
-    {:hash-result hash-result
-     :time-taken time-taken}))
+      (spit hashed-file-path hash-result :append true)
+      hash-result)))
 
 (defn -main
-  "I don't do a whole lot ... yet."
   [& args]
   (greet {:name (first args)})
 
   (let [file-set-count (count file-set)
         starting-hashed-set-count (count hashed-file-paths)
-        unhashed-files-remaining (atom (count unhashed-files))
-        start-time (System/currentTimeMillis)]
+        unhashed-files-remaining (atom (count unhashed-files))]
 
     (println "Total files:" file-set-count)
     (println "Starting Hashed files:" starting-hashed-set-count)
     (println "Starting Unhashed files:" @unhashed-files-remaining)
 
-    (doall (pmap (fn [file]
-                   (let [{:keys [hash-result time-taken]} (hash-and-update-progress file)
-                         current-time (System/currentTimeMillis)
-                         elapsed-time (- current-time start-time)
-                         files-processed (abs (+ starting-hashed-set-count (- @unhashed-files-remaining)))]
-
+    (doall (pmap (fn [file-path]
+                   (let [hash-result (hash-and-append-result file-path)]
                      (when hash-result
                        (swap! unhashed-files-remaining dec)
-                       (swap! average-time-per-file (fn [current-average]
-                                                      (exponential-moving-average current-average time-taken alpha)))
-                       (update-progress file-set-count files-processed @unhashed-files-remaining @average-time-per-file))))
+                       (update-progress file-set-count starting-hashed-set-count @unhashed-files-remaining))))
                  unhashed-files))))
+
