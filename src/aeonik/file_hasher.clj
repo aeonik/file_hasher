@@ -6,7 +6,6 @@
             [clojure.set :as set]
             [clojure.tools.cli :refer [parse-opts]]))
 
-
 (def cli-options
   ;; An option with a required argument
   [["-d" "--directory DIR" "Directory Root"
@@ -22,14 +21,15 @@
    ;; A boolean option defaulting to nil
    ["-h" "--help"]])
 
-(def base-dir "/run/media/dave/backup_hdd")
+(def base-dir "/run/media/dave/backup_nvme")
 (def working-dir "/opt/backup_nvme_recovery")
 ;; Make directory for files if it doesn't already exist
 ;(io/make-parents (str base-dir "/opt/backup_nvme_recovery"))
 
-(def hashed-file-path "/opt/backup_nvme_recovery/sha256sums_backup_hdd.txt")
-(def error-file-path "/opt/backup_nvme_recovery/sha256sums_backup_hdd_errors.txt")
-(def file-list-path "/opt/backup_nvme_recovery/backup_hdd_file_list.txt")
+(def hashed-file-path "/opt/backup_nvme_recovery/sha256sums_backup_nvme.txt")
+(def hashed-file-error-path "/opt/backup_nvme_recovery/sha256sums_backup_nvme_errors.txt")
+(def file-list-path "/opt/backup_nvme_recovery/backup_nvme_file_list.txt")
+(def file-list-error-path "/opt/backup_nvme_recovery/backup_nvme_file_list_errors.txt")
 (def alpha 0.01)
 (def smoothing-alpha 0.01)
 (def average-time-per-file (atom 0))
@@ -53,14 +53,27 @@
 
 (def ^set unhashed-files (set/difference file-set hashed-file-paths))
 
+(defn generate-paths [directory]
+  (let [base-dir directory
+        working-dir (str base-dir "/opt/backup_nvme_recovery")
+        hashed-file-path (str working-dir "/sha256sums_backup_nvme.txt")
+        hashed-file-error-path (str working-dir "/sha256sums_backup_nvme_errors.txt")
+        file-list-path (str working-dir "/backup_nvme_file_list.txt")
+        file-list-error-path (str working-dir "/backup_nvme_file_list_errors.txt")]
+    {:base-dir base-dir
+     :working-dir working-dir
+     :hashed-file-path hashed-file-path
+     :hashed-file-error-path hashed-file-error-path
+     :file-list-path file-list-path
+     :file-list-error-path file-list-error-path}))
+
 (defn hash-file [file-path]
   (let [{:keys [out err exit]} (shell/sh "sha256sum" file-path)]
     (if (= exit 0)
       out
       (do
-        (spit error-file-path err :append true)
+        (spit hashed-file-error-path err :append true)
         nil))))
-
 
 (defn greet
   "Callable entry point to the application."
@@ -91,10 +104,7 @@
       (spit hashed-file-path hash-result :append true)
       hash-result)))
 
-(defn -main
-  [& args]
-  (greet {:name (first args)})
-
+(defn hash-files []
   (let [file-set-count (count file-set)
         starting-hashed-set-count (count hashed-file-paths)
         unhashed-files-remaining (atom (count unhashed-files))]
@@ -110,3 +120,7 @@
                        (update-progress file-set-count starting-hashed-set-count @unhashed-files-remaining))))
                  unhashed-files))))
 
+(defn -main
+  [& args]
+  (greet {:name (first args)})
+  (comment (hash-files)))
