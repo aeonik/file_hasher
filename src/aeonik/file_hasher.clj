@@ -8,7 +8,8 @@
             [clojure.java.jdbc :as jdbc])
   (:import (org.apache.commons.io FilenameUtils)
            (java.time LocalDateTime Instant ZoneId)
-           (java.time.format DateTimeFormatter)))
+           (java.time.format DateTimeFormatter)
+           (java.io BufferedWriter FileWriter)))
 
 
 
@@ -22,9 +23,6 @@
         formatted-time  (.format local-date-time formatter)]
     (print (str formatted-time " "))
     (reset! time-atom current-time-ms)))
-
-; Update the time and print it
-(update-time)
 
 (defn get-elapsed-time []
   (let [current-time-ms (System/currentTimeMillis)
@@ -117,9 +115,8 @@
     ;(pp/pprint (str "Lines:" lines))                        ; Print lines for debugging
     (into #{} lines)))
 
+(def batch-size 10000)
 
-
-(def batch-size 1000)
 (def db-spec
   {:subprotocol "postgresql"
    :subname     "//localhost:5432/file_hasher"
@@ -152,6 +149,33 @@
 (defn load-files-into-db [files prefix batch-size]
   (let [data (map #(build-data-row (parse-line % prefix)) files)]
     (insert-data-batch data batch-size)))
+
+(defn fetch-duplicate-paths []
+  (println "Fetching duplicate paths...")
+  (jdbc/with-db-connection [conn db-spec]
+                           (jdbc/query conn
+                                       ["SELECT p.hash, p.path, d.count
+                  FROM paths AS p
+                  JOIN (
+                    SELECT hash, COUNT(hash) AS count
+                    FROM paths
+                    GROUP BY hash
+                    HAVING COUNT(hash) > 1
+                  ) AS d
+                  ON p.hash = d.hash
+                  ORDER BY d.count DESC, p.hash, p.path"])))
+
+(defn save-results-to-file [results file-path]
+  (with-open [writer (BufferedWriter. (FileWriter. file-path))]
+    (doseq [row results]
+      (.write writer (str (:hash row) " " (:path row) " " (:count row) "\n")))))
+
+(defn export-duplicate-paths [output-file]
+  (println "Exporting duplicate paths to file...")
+  (let [results (fetch-duplicate-paths)]
+    (save-results-to-file results output-file)))
+
+;; Usage: (export-duplicate-paths "output.txt")
 
 (defn exists-in-set? [item set comparator]
   (some #(comparator item %) set))
@@ -276,11 +300,9 @@
                        (update-progress file-set-count starting-hashed-set-count @unhashed-files-remaining))))
                  unhashed-files))))
 
-(defn -main
-  [& args]
-  (println "file_hasher starting...")
+(defn process-files [args]
+  (println "Starting process-files...")
   (println "Loading data from disk... ")
-  (update-time)
   (let [{:keys [options]} (parse-opts args cli-options)
         base-dir            (:directory options)
         paths               (generate-paths base-dir)
@@ -291,9 +313,7 @@
         missing-nvme-file   (str (:working-dir paths) "/" "missing_in_nvme.txt")
         missing-hdd-file    (str (:working-dir paths) "/" "missing_in_hdd.txt")
         nvme-files          (read-file-into-set nvme-file-hash-list)
-        hdd-files           (read-file-into-set hdd-file-hash-list)
-        ]
-
+        hdd-files           (read-file-into-set hdd-file-hash-list)]
 
     (println "Base directory:" base-dir)
     (println "Working directory:" (:working-dir paths))
@@ -302,8 +322,6 @@
     (println "File list path:" (:file-list-path paths))
     (println "File list error path:" (:file-list-error-path paths))
     (println (str "Data Loaded into sets in " (get-elapsed-time) " seconds"))
-    (println (str "Elapsed time "))
-
 
     (println "Entering main parsing loops...")
     (println "Begin processing hdd-files...")
@@ -336,35 +354,14 @@
 
     (println (str "Elapsed time " (get-elapsed-time) " seconds"))
     (println "Loading database with hdd-files... ")
-    (doseq [entry hdd-files]
-      (let [parsed-entry (parse-line entry hdd-prefix)]
-        (insert-data (:path parsed-entry)
-                     (:hash parsed-entry)
-                     (:dirname parsed-entry)
-                     (:basename parsed-entry)
-                     (:stripped-path-prefix parsed-entry)
-                     (:stripped-path parsed-entry))
-        ;(pp/pprint parsed-entry)
-        ))                                                  ; <-- Added pprint statement
+    (load-files-into-db hdd-files hdd-prefix batch-size)
 
     (println (str "Elapsed time " (get-elapsed-time) " seconds"))
     (println "Loading database with nvme-files... ")
-    (doseq [entry nvme-files]
-      (let [parsed-entry (parse-line entry nvme-prefix)]
-        (insert-data (:path parsed-entry)
-                     (:hash parsed-entry)
-                     (:dirname parsed-entry)
-                     (:basename parsed-entry)
-                     (:stripped-path-prefix parsed-entry)
-                     (:stripped-path parsed-entry))
-        ;(pp/pprint parsed-entry)
-        ))                                                  ; <-- Added pprint statement
+    (load-files-into-db nvme-files nvme-prefix batch-size)
 
     (println (str "Elapsed time " (get-elapsed-time) " seconds"))
-    (println "Done!")
-    ; Use paths map for the rest of the program
-    (greet {:name (first args)})
-
+    (println "Done processing files!")
     (comment (let [missing-files (find-missing-files nvme-file-hash-list hdd-file-hash-list nvme-prefix hdd-prefix)]
                (println "Missing in NVMe:")
                (pp/pprint (:missing-in-nvme missing-files))
@@ -376,3 +373,25 @@
                (file-set)
                (hashed-file-paths)
                (unhashed-files)))))
+
+(defn run-export-duplicate-paths [args]
+  (let [{:keys [options]} (parse-opts args cli-options)
+        base-dir    (:directory options)
+        paths       (generate-paths base-dir)
+        output-file (str (:working-dir paths) "/" "duplicate_files_detected.txt")]
+
+    (export-duplicate-paths output-file)))
+
+;; Usage: (process-files args)
+
+
+(defn -main
+  [& args]
+  (update-time)
+  (println)
+  (println "file_hasher starting...")
+
+  (comment run-export-duplicate-paths args)
+  (comment (process-files args))
+
+  (println "Done!"))
