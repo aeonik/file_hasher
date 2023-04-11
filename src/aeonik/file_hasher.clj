@@ -6,8 +6,32 @@
             [clojure.set :as set]
             [clojure.tools.cli :refer [parse-opts]]
             [clojure.java.jdbc :as jdbc])
-  (:import (org.apache.commons.io FilenameUtils))
-  )
+  (:import (org.apache.commons.io FilenameUtils)
+           (java.time LocalDateTime Instant ZoneId)
+           (java.time.format DateTimeFormatter)))
+
+
+
+
+(def time-atom (atom (System/currentTimeMillis)))
+(defn update-time []
+  (let [current-time-ms (System/currentTimeMillis)
+        local-date-time (LocalDateTime/ofInstant (Instant/ofEpochMilli current-time-ms)
+                                                 (ZoneId/systemDefault))
+        formatter       (DateTimeFormatter/ofPattern "yyyy-MM-dd'T'HH:mm:ss.SSS")
+        formatted-time  (.format local-date-time formatter)]
+    (print (str formatted-time " "))
+    (reset! time-atom current-time-ms)))
+
+; Update the time and print it
+(update-time)
+
+(defn get-elapsed-time []
+  (let [current-time-ms (System/currentTimeMillis)
+        elapsed-time    (/ (- current-time-ms @time-atom) 1000.0)]
+    (reset! time-atom current-time-ms)
+    elapsed-time))
+
 
 
 (def cli-options
@@ -26,6 +50,10 @@
    ;; A boolean option defaulting to nil
    ["-h" "--help"]])
 
+(defn clear-terminal []
+  (print "\033[2J\033[H")
+  (flush))
+
 (def base-dir "/run/media/dave/backup_nvme")
 (def working-dir "/opt/backup_nvme_recovery")
 ;; Make directory for files if it doesn't already exist
@@ -38,38 +66,27 @@
 
 (defn strip-path-prefix [path prefix]
   (str/replace path (re-pattern (str (java.util.regex.Pattern/quote prefix) "(.*?)$")) "$1"))
-
-(defmulti read-file-into-set
-          (fn [file-path & args]
-            (count args)))
-
-(defmethod read-file-into-set 0
-  [file-path]
-  (let [lines (with-open [rdr (io/reader file-path)]
-                (doall (line-seq rdr)))]
-    (into #{} lines)))
-
-(defmethod read-file-into-set 1
-  [file-path num-lines]
-  (let [lines (with-open [rdr (io/reader file-path)]
-                (doall
-                  (take num-lines (line-seq rdr))
-                  ))]
-    (into #{} lines)))
-
 (defmulti parse-line (fn [line & args] (count args)))
 
 (defmethod parse-line 0
   [line]
+  ;(println "Input line to parse-line:" line) ; <-- Add this line
   (let [[hash path] (str/split line #"\s+" 2)
-        basename (FilenameUtils/getBaseName path)
+        basename  (FilenameUtils/getBaseName path)
         extension (FilenameUtils/getExtension path)
-        dirname (FilenameUtils/getFullPathNoEndSeparator path)]
+        dirname   (FilenameUtils/getFullPathNoEndSeparator path)]
+    ;(println "line:" line)  ; <-- Added print statement
+    ;(println "hash:" hash)  ; <-- Added print statement
+    ;(println "path:" path)  ; <-- Added print statement
+    ;(println "basename:" basename)  ; <-- Added print statement
+    ;(println "extension:" extension)  ; <-- Added print statement
+    ;(println "dirname:" dirname)  ; <-- Added print statement
     {:path      path
      :dirname   dirname
      :basename  basename
      :extension (when (not-empty extension) (str "." extension))
      :hash      hash}))
+
 
 (defmethod parse-line 1
   [line prefix]
@@ -80,12 +97,42 @@
         stripped-path        (strip-path-prefix path prefix)]
     (assoc result :stripped-path-prefix stripped-path-prefix
                   :stripped-path stripped-path)))
+(defmulti read-file-into-set
+          (fn [file-path & args]
+            (count args)))
 
+(defmethod read-file-into-set 0
+  [file-path]
+  (let [lines (with-open [rdr (io/reader file-path)]
+                (doall (line-seq rdr)))]
+    ;(pp/pprint (str "Lines:" lines))                        ; Print lines for debugging
+    (into #{} lines)))
+
+(defmethod read-file-into-set 1
+  [file-path num-lines]
+  (let [lines (with-open [rdr (io/reader file-path)]
+                (doall
+                  (take num-lines (line-seq rdr))
+                  ))]
+    ;(pp/pprint (str "Lines:" lines))                        ; Print lines for debugging
+    (into #{} lines)))
+
+
+
+(def batch-size 1000)
 (def db-spec
   {:subprotocol "postgresql"
    :subname     "//localhost:5432/file_hasher"
    :user        "file_hasher"
    :password    "123123123"})
+
+(defn build-data-row [parsed-entry]
+  {:path                 (:path parsed-entry)
+   :hash                 (:hash parsed-entry)
+   :dirname              (:dirname parsed-entry)
+   :basename             (:basename parsed-entry)
+   :stripped_path_prefix (:stripped-path-prefix parsed-entry)
+   :stripped_path        (:stripped-path parsed-entry)})
 
 (defn insert-data [path hash dirname basename stripped-path-prefix stripped-path]
   (jdbc/with-db-connection [conn db-spec]
@@ -97,7 +144,14 @@
                                           :stripped_path_prefix stripped-path-prefix
                                           :stripped_path        stripped-path})))
 
+(defn insert-data-batch [data batch-size]
+  (doseq [chunk (partition-all batch-size data)]
+    (jdbc/with-db-connection [conn db-spec]
+                             (jdbc/insert-multi! conn :paths chunk))))
 
+(defn load-files-into-db [files prefix batch-size]
+  (let [data (map #(build-data-row (parse-line % prefix)) files)]
+    (insert-data-batch data batch-size)))
 
 (defn exists-in-set? [item set comparator]
   (some #(comparator item %) set))
@@ -112,12 +166,10 @@
 (defn find-missing-files [nvme-file-list hdd-file-list nvme-prefix hdd-prefix]
   (let [nvme-files      (read-file-into-set nvme-file-list nvme-prefix)
         hdd-files       (read-file-into-set hdd-file-list hdd-prefix)
-        missing-in-nvme (clojure.set/difference hdd-files nvme-files)
-        missing-in-hdd  (clojure.set/difference nvme-files hdd-files)]
+        missing-in-nvme (set/difference hdd-files nvme-files)
+        missing-in-hdd  (set/difference nvme-files hdd-files)]
     {:missing-in-nvme missing-in-nvme
      :missing-in-hdd  missing-in-hdd}))
-
-
 
 (defn get-basename [path]
   (FilenameUtils/getBaseName path))
@@ -173,9 +225,11 @@
   (let [{:keys [out err exit]} (shell/sh "sha256sum" file-path)]
     (if (= exit 0)
       out
-      ((do
-         (spit (generate-paths :hashed-file-error-path) err :append true)
-         nil)))))
+      (do
+        (spit (:hashed-file-path paths) (str out "  " file-path "\n") :append true)
+        nil)
+      )))
+
 
 (defn greet
   "Callable entry point to the application."
@@ -224,6 +278,9 @@
 
 (defn -main
   [& args]
+  (println "file_hasher starting...")
+  (println "Loading data from disk... ")
+  (update-time)
   (let [{:keys [options]} (parse-opts args cli-options)
         base-dir            (:directory options)
         paths               (generate-paths base-dir)
@@ -233,8 +290,8 @@
         hdd-prefix          "/run/media/dave/backup_hdd/backup_nvme"
         missing-nvme-file   (str (:working-dir paths) "/" "missing_in_nvme.txt")
         missing-hdd-file    (str (:working-dir paths) "/" "missing_in_hdd.txt")
-        nvme-files          (read-file-into-set nvme-file-hash-list 10)
-        hdd-files           (read-file-into-set hdd-file-hash-list 10)
+        nvme-files          (read-file-into-set nvme-file-hash-list)
+        hdd-files           (read-file-into-set hdd-file-hash-list)
         ]
 
 
@@ -244,48 +301,67 @@
     (println "Hashed file error path:" (:hashed-file-error-path paths))
     (println "File list path:" (:file-list-path paths))
     (println "File list error path:" (:file-list-error-path paths))
-    (println "Smoothing alpha:" smoothing-alpha)
+    (println (str "Data Loaded into sets in " (get-elapsed-time) " seconds"))
+    (println (str "Elapsed time "))
 
 
+    (println "Entering main parsing loops...")
+    (println "Begin processing hdd-files...")
     (doseq [entry hdd-files]
-      (let [parsed-entry (parse-line entry hdd-prefix)]
-        (println parsed-entry)
-        (println (:path parsed-entry))
-        (println (:hash parsed-entry))
-        (println (:dirname parsed-entry))
-        (println (:basename parsed-entry))
-        (println (:stripped-path-prefix parsed-entry))
-        (println (:stripped-path parsed-entry))))
-
+      (try
+        (let [parsed-entry (parse-line entry hdd-prefix)]
+          ;(println (str parsed-entry))
+          ;(println (str (:path parsed-entry)))
+          ;(println (str (:hash parsed-entry)))
+          ;(println (str (:dirname parsed-entry)))
+          ;(println (str (:basename parsed-entry)))
+          ;(println (str (:stripped-path-prefix parsed-entry)))
+          ;(println (str (:stripped-path parsed-entry)))
+          )
+        (catch Exception e
+          (println "Error processing entry:" entry)
+          (println "Exception:" e))))
+    (println (str "Elapsed time " (get-elapsed-time) " seconds"))
+    (println "Begin processing nvme-files...")
     (doseq [entry nvme-files]
       (let [parsed-entry (parse-line entry nvme-prefix)]
-        (pp/pprint parsed-entry)
-        (println (:path parsed-entry))
-        (println (:hash parsed-entry))
-        (println (:dirname parsed-entry))
-        (println (:basename parsed-entry))
-        (println (:stripped-path-prefix parsed-entry))
-        (println (:stripped-path parsed-entry))))
+        ;(pp/pprint parsed-entry)
+        ;(println (:path parsed-entry))
+        ;(println (:hash parsed-entry))
+        ;(println (:dirname parsed-entry))
+        ;(println (:basename parsed-entry))
+        ;(println (:stripped-path-prefix parsed-entry))
+        ;(println (:stripped-path parsed-entry))
+        ))
 
-    (comment (doseq [entry hdd-files]
-               (let [parsed-entry (parse-line entry)]
-                 (insert-data (:path parsed-entry)
-                              (:hash parsed-entry)
-                              (:dirname parsed-entry)
-                              (:basename parsed-entry)
-                              (:stripped-path-prefix parsed-entry)
-                              (:stripped-path parsed-entry))))
+    (println (str "Elapsed time " (get-elapsed-time) " seconds"))
+    (println "Loading database with hdd-files... ")
+    (doseq [entry hdd-files]
+      (let [parsed-entry (parse-line entry hdd-prefix)]
+        (insert-data (:path parsed-entry)
+                     (:hash parsed-entry)
+                     (:dirname parsed-entry)
+                     (:basename parsed-entry)
+                     (:stripped-path-prefix parsed-entry)
+                     (:stripped-path parsed-entry))
+        ;(pp/pprint parsed-entry)
+        ))                                                  ; <-- Added pprint statement
 
-             (doseq [entry nvme-files]
-               (let [parsed-entry (parse-line entry)]
-                 (insert-data (:path parsed-entry)
-                              (:hash parsed-entry)
-                              (:dirname parsed-entry)
-                              (:basename parsed-entry)
-                              (:stripped-path-prefix parsed-entry)
-                              (:stripped-path parsed-entry)))))
+    (println (str "Elapsed time " (get-elapsed-time) " seconds"))
+    (println "Loading database with nvme-files... ")
+    (doseq [entry nvme-files]
+      (let [parsed-entry (parse-line entry nvme-prefix)]
+        (insert-data (:path parsed-entry)
+                     (:hash parsed-entry)
+                     (:dirname parsed-entry)
+                     (:basename parsed-entry)
+                     (:stripped-path-prefix parsed-entry)
+                     (:stripped-path parsed-entry))
+        ;(pp/pprint parsed-entry)
+        ))                                                  ; <-- Added pprint statement
 
-
+    (println (str "Elapsed time " (get-elapsed-time) " seconds"))
+    (println "Done!")
     ; Use paths map for the rest of the program
     (greet {:name (first args)})
 
