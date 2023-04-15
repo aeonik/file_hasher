@@ -5,13 +5,12 @@
             [clojure.pprint :as pp]
             [clojure.set :as set]
             [clojure.tools.cli :refer [parse-opts]]
-            [clojure.java.jdbc :as jdbc])
+            [clojure.java.jdbc :as jdbc]
+            [cheshire.core :as json])
   (:import (org.apache.commons.io FilenameUtils)
            (java.time LocalDateTime Instant ZoneId)
            (java.time.format DateTimeFormatter)
            (java.io BufferedWriter FileWriter)))
-
-
 
 
 (def time-atom (atom (System/currentTimeMillis)))
@@ -29,8 +28,6 @@
         elapsed-time    (/ (- current-time-ms @time-atom) 1000.0)]
     (reset! time-atom current-time-ms)
     elapsed-time))
-
-
 
 (def cli-options
   ;; An option with a required argument
@@ -64,37 +61,26 @@
 
 (defn strip-path-prefix [path prefix]
   (str/replace path (re-pattern (str (java.util.regex.Pattern/quote prefix) "(.*?)$")) "$1"))
-(defmulti parse-line (fn [line & args] (count args)))
 
-(defmethod parse-line 0
-  [line]
-  ;(println "Input line to parse-line:" line) ; <-- Add this line
-  (let [[hash path] (str/split line #"\s+" 2)
-        basename  (FilenameUtils/getBaseName path)
-        extension (FilenameUtils/getExtension path)
-        dirname   (FilenameUtils/getFullPathNoEndSeparator path)]
-    ;(println "line:" line)  ; <-- Added print statement
-    ;(println "hash:" hash)  ; <-- Added print statement
-    ;(println "path:" path)  ; <-- Added print statement
-    ;(println "basename:" basename)  ; <-- Added print statement
-    ;(println "extension:" extension)  ; <-- Added print statement
-    ;(println "dirname:" dirname)  ; <-- Added print statement
-    {:path      path
-     :dirname   dirname
-     :basename  basename
-     :extension (when (not-empty extension) (str "." extension))
-     :hash      hash}))
+(defn parse-line
+  ([line] (parse-line line nil))
+  ([line prefix]
+   (let [[hash path] (str/split line #"\s+" 2)
+         basename  (FilenameUtils/getBaseName path)
+         extension (FilenameUtils/getExtension path)
+         dirname   (FilenameUtils/getFullPathNoEndSeparator path)
+         result    {:path      path
+                    :dirname   dirname
+                    :basename  basename
+                    :extension (when (not-empty extension) (str "." extension))
+                    :hash      hash}]
+     (if prefix
+       (let [stripped-path-prefix prefix
+             stripped-path        (strip-path-prefix path prefix)]
+         (assoc result :stripped-path-prefix stripped-path-prefix
+                       :stripped-path stripped-path))
+       result))))
 
-
-(defmethod parse-line 1
-  [line prefix]
-  (let [result               (parse-line line)
-        path                 (:path result)
-        stripped-path-prefix prefix
-        basename             (:basename result)
-        stripped-path        (strip-path-prefix path prefix)]
-    (assoc result :stripped-path-prefix stripped-path-prefix
-                  :stripped-path stripped-path)))
 (defmulti read-file-into-set
           (fn [file-path & args]
             (count args)))
@@ -129,9 +115,13 @@
    :dirname              (:dirname parsed-entry)
    :basename             (:basename parsed-entry)
    :stripped_path_prefix (:stripped-path-prefix parsed-entry)
-   :stripped_path        (:stripped-path parsed-entry)})
+   :stripped_path        (:stripped-path parsed-entry)
+   :extension            (:extension parsed-entry)})
 
-(defn insert-data [path hash dirname basename stripped-path-prefix stripped-path]
+(defn build-data-rows [files prefix]
+  (map #(build-data-row (parse-line % prefix)) files))
+
+(defn insert-data [path hash dirname basename stripped-path-prefix stripped-path extension]
   (jdbc/with-db-connection [conn db-spec]
                            (jdbc/insert! conn :paths
                                          {:path                 path
@@ -139,7 +129,8 @@
                                           :dirname              dirname
                                           :basename             basename
                                           :stripped_path_prefix stripped-path-prefix
-                                          :stripped_path        stripped-path})))
+                                          :stripped_path        stripped-path
+                                          :extension            extension})))
 
 (defn insert-data-batch [data batch-size]
   (doseq [chunk (partition-all batch-size data)]
@@ -341,24 +332,16 @@
           (println "Exception:" e))))
     (println (str "Elapsed time " (get-elapsed-time) " seconds"))
     (println "Begin processing nvme-files...")
-    (doseq [entry nvme-files]
-      (let [parsed-entry (parse-line entry nvme-prefix)]
-        ;(pp/pprint parsed-entry)
-        ;(println (:path parsed-entry))
-        ;(println (:hash parsed-entry))
-        ;(println (:dirname parsed-entry))
-        ;(println (:basename parsed-entry))
-        ;(println (:stripped-path-prefix parsed-entry))
-        ;(println (:stripped-path parsed-entry))
-        ))
 
     (println (str "Elapsed time " (get-elapsed-time) " seconds"))
-    (println "Loading database with hdd-files... ")
-    (load-files-into-db hdd-files hdd-prefix batch-size)
+    (comment
+      (println "Loading database with hdd-files... ")
+      (load-files-into-db hdd-files hdd-prefix batch-size))
 
     (println (str "Elapsed time " (get-elapsed-time) " seconds"))
-    (println "Loading database with nvme-files... ")
-    (load-files-into-db nvme-files nvme-prefix batch-size)
+    (comment
+      (println "Loading database with nvme-files... ")
+      (load-files-into-db nvme-files nvme-prefix batch-size))
 
     (println (str "Elapsed time " (get-elapsed-time) " seconds"))
     (println "Done processing files!")
@@ -382,6 +365,17 @@
 
     (export-duplicate-paths output-file)))
 
+(defn export-data-rows [output-file data-rows]
+  (with-open [writer (io/writer output-file)]
+    (doseq [row data-rows]
+      (.write writer (json/generate-string row))
+      (.write writer "\n"))))
+
+
+
+(defn run-export-data-rows [output-file data-rows]
+  (export-data-rows output-file data-rows))
+
 ;; Usage: (process-files args)
 
 
@@ -394,4 +388,20 @@
   (comment run-export-duplicate-paths args)
   (comment (process-files args))
 
+  (let [{:keys [options]} (parse-opts args cli-options)
+        base-dir            (:directory options)
+        paths               (generate-paths base-dir)
+        nvme-file-hash-list (str (:working-dir paths) "/" "backup_nvme_sha256sums.txt")
+        hdd-file-hash-list  (str (:working-dir paths) "/" "backup_hdd_sha256sums.txt")
+        nvme-prefix         "/mnt/nvme1"
+        hdd-prefix          "/run/media/dave/backup_hdd/backup_nvme"
+        missing-nvme-file   (str (:working-dir paths) "/" "missing_in_nvme.txt")
+        missing-hdd-file    (str (:working-dir paths) "/" "missing_in_hdd.txt")
+        nvme-files          (read-file-into-set nvme-file-hash-list)
+        hdd-files           (read-file-into-set hdd-file-hash-list)
+        output-file         (str (:working-dir paths) "/" "data_rows.json")]
+
+
+    (export-data-rows output-file (concat (build-data-rows nvme-files nvme-prefix)
+                                          (build-data-rows hdd-files hdd-prefix))))
   (println "Done!"))
