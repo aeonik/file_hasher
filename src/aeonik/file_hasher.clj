@@ -108,7 +108,7 @@
   {:subprotocol "postgresql"
    :subname     "//localhost:5432/file_hasher"
    :user        "file_hasher"
-   :password    (:db-password (slurp "resources/secrets.edn"))})
+   :password    (:db-password config)})
 
 (defn build-data-row [parsed-entry]
   {:path                 (:path parsed-entry)
