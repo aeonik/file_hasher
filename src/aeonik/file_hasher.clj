@@ -14,6 +14,7 @@
 
 
 (def time-atom (atom (System/currentTimeMillis)))
+(def config (slurp "resources/secrets.edn"))
 (defn update-time []
   (let [current-time-ms (System/currentTimeMillis)
         local-date-time (LocalDateTime/ofInstant (Instant/ofEpochMilli current-time-ms)
@@ -49,8 +50,8 @@
   (print "\033[2J\033[H")
   (flush))
 
-(def base-dir "/run/media/dave/backup_nvme")
-(def working-dir "/opt/backup_nvme_recovery")
+(def base-dir (:base-dir config))
+(def working-dir (:working-dir config))
 ;; Make directory for files if it doesn't already exist
 ;(io/make-parents (str base-dir "/opt/backup_nvme_recovery"))
 
@@ -107,7 +108,7 @@
   {:subprotocol "postgresql"
    :subname     "//localhost:5432/file_hasher"
    :user        "file_hasher"
-   :password    "123123123"})
+   :password    (:db-password (slurp "resources/secrets.edn"))})
 
 (defn build-data-row [parsed-entry]
   {:path                 (:path parsed-entry)
@@ -199,7 +200,7 @@
 (defn generate-paths [base-dir]
   (let [basename               (get-basename base-dir)
         dirname                (get-dirname base-dir)
-        working-dir            "/opt/backup_nvme_recovery"
+        working-dir            (working-dir)
         hashed-file-path       (str working-dir "/" basename "_sha256sums.txt")
         hashed-file-error-path (insert-before-extension hashed-file-path "_errors")
         file-list-path         (str working-dir "/" basename "_file_list.txt")
@@ -299,8 +300,8 @@
         paths               (generate-paths base-dir)
         nvme-file-hash-list (str (:working-dir paths) "/" "backup_nvme_sha256sums.txt")
         hdd-file-hash-list  (str (:working-dir paths) "/" "backup_hdd_sha256sums.txt")
-        nvme-prefix         "/mnt/nvme1"
-        hdd-prefix          "/run/media/dave/backup_hdd/backup_nvme"
+        nvme-prefix         (:prefix2 config)
+        hdd-prefix          (:prefix1 config)
         missing-nvme-file   (str (:working-dir paths) "/" "missing_in_nvme.txt")
         missing-hdd-file    (str (:working-dir paths) "/" "missing_in_hdd.txt")
         nvme-files          (read-file-into-set nvme-file-hash-list)
@@ -393,8 +394,8 @@
         paths               (generate-paths base-dir)
         nvme-file-hash-list (str (:working-dir paths) "/" "backup_nvme_sha256sums.txt")
         hdd-file-hash-list  (str (:working-dir paths) "/" "backup_hdd_sha256sums.txt")
-        nvme-prefix         "/mnt/nvme1"
-        hdd-prefix          "/run/media/dave/backup_hdd/backup_nvme"
+        nvme-prefix         (:prefix2 config)
+        hdd-prefix          (:prefix1 config)
         missing-nvme-file   (str (:working-dir paths) "/" "missing_in_nvme.txt")
         missing-hdd-file    (str (:working-dir paths) "/" "missing_in_hdd.txt")
         nvme-files          (read-file-into-set nvme-file-hash-list)
