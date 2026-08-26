@@ -4,7 +4,7 @@
 
 (def lib 'net.clojars.aeonik/file_hasher)
 (def version "0.1.0-SNAPSHOT")
-(def main 'aeonik.file-hasher)
+(def main 'aeonik.inventory.cli)
 
 (defn test "Run the tests." [opts]
   (bb/run-tests opts))
