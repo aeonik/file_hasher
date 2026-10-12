@@ -1,3 +1,4 @@
 # Introduction to file_hasher
 
-TODO: write [great documentation](http://jacobian.org/writing/what-to-write/)
+Usage and requirements are in the [README](../README.md). The scan data model
+and consistency rules are in [architecture.md](architecture.md).
